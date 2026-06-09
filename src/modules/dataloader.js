@@ -3,6 +3,7 @@ import { get_status, set_status } from "./storage_utils.js";
 class LocalDataLoader {
     static STATS_DATA_PATH = "./data/awakened poe trade/en_stats.min.json";
     static POE2_STATS_DATA_PATH = "./data/exiled exchange 2/poe2_stats.min.json";
+    static POE2_BASES_DATA_PATH = "./data/exiled exchange 2/poe2_bases.min.json";
     static GEMS_DATA_PATH = "./data/com_preprocessed_gems_data.json";
     static TW_GEMS_DATA_PATH = "./data/tw_preprocessed_gems_data.json";
     static QUERY_PATH = "./data/query.json";
@@ -21,9 +22,11 @@ class LocalDataLoader {
         // 確保既有安裝在新增 PoE2 詞綴表後會自動補載（否則 query_data 已存在會直接略過）。
         const query_data = await get_status("local_query_data");
         const poe2_stats_data = await get_status("local_poe2_stats_data");
+        const poe2_bases_data = await get_status("local_poe2_bases_data");
         if (
             query_data === undefined || query_data === null ||
-            poe2_stats_data === undefined || poe2_stats_data === null
+            poe2_stats_data === undefined || poe2_stats_data === null ||
+            poe2_bases_data === undefined || poe2_bases_data === null
         ) {
             return true;
         }
@@ -47,6 +50,7 @@ class LocalDataLoader {
         const urls = {
             local_stats_data: LocalDataLoader.STATS_DATA_PATH,
             local_poe2_stats_data: LocalDataLoader.POE2_STATS_DATA_PATH,
+            local_poe2_bases_data: LocalDataLoader.POE2_BASES_DATA_PATH,
             local_gems_data: LocalDataLoader.GEMS_DATA_PATH,
             local_tw_gems_data: LocalDataLoader.TW_GEMS_DATA_PATH,
             local_query_data: LocalDataLoader.QUERY_PATH,

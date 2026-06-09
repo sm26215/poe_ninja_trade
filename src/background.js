@@ -1070,11 +1070,25 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
  * 集中放在頁面右上角的自帶面板。連結會帶上「名稱/底材 + 可對應到的 explicit mod stats」。
  * 不經 webRequest（該請求在頁面載入早期觸發，MV3 service worker 常來不及攔截）。
  * @param {Object} poe2_stats Exiled Exchange 2 的 PoE2 詞綴表（last-two-words -> matchers）
+ * @param {string[]} poe2_bases PoE2 底材名稱清單，用於還原魔法物品的底材
  * @return {None}
  */
-async function inject_pob_panel(poe2_stats) {
+async function inject_pob_panel(poe2_stats, poe2_bases) {
     const PANEL_ID = "r2t-pob-panel";
     console.log("[R2T][PAGE] inject_pob_panel start");
+
+    const bases_set = new Set(poe2_bases || []);
+    // 魔法物品名稱為「字首 + 底材 + of 字尾」，PoB 不另存底材。先去掉 " of 字尾"，
+    // 再用 bases_set 取最長的「字尾相符底材」（從整串往後縮，第一個命中的即最長底材）。
+    function extract_magic_base(name) {
+        const candidate = name.split(/ of /i)[0].trim();
+        const words = candidate.split(/\s+/);
+        for (let i = 0; i < words.length; i++) {
+            const sub = words.slice(i).join(" ");
+            if (bases_set.has(sub)) return sub;
+        }
+        return null;
+    }
 
     const redirect_to = (await chrome.storage.local.get(["redirect-to"]))["redirect-to"] || "com";
     const trade_type = (await chrome.storage.local.get(["trade-type"]))["trade-type"];
@@ -1144,7 +1158,9 @@ async function inject_pob_panel(poe2_stats) {
         if (lines[0].startsWith("Rarity:")) { rarity = lines[0].slice(7).trim().toUpperCase(); i = 1; }
         const name = lines[i] || "";
         const maybe_base = lines[i + 1] || "";
-        const base = (maybe_base && !maybe_base.includes(":")) ? maybe_base : name; // 屬性行含冒號
+        // 魔法物品名稱含字首/字尾、且 PoB 不另存底材行，需從名稱還原底材
+        let base = (rarity === "MAGIC") ? (extract_magic_base(name) || name)
+            : ((maybe_base && !maybe_base.includes(":")) ? maybe_base : name); // 屬性行含冒號
 
         let mods = [];
         const imp_idx = lines.findIndex(l => /^Implicits:\s*\d+/.test(l));
@@ -1309,12 +1325,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         const local_loader = new LocalDataLoader();
         await local_loader.update_data();
         const poe2_stats = await local_loader.get_data("local_poe2_stats_data");
+        const poe2_bases = await local_loader.get_data("local_poe2_bases_data");
 
         console.log(`[R2T][BG] pob page detected, injecting: ${tab.url}`);
         chrome.scripting.executeScript({
             target: { tabId },
             function: inject_pob_panel,
-            args: [poe2_stats],
+            args: [poe2_stats, poe2_bases],
         });
     } catch (e) {
         console.error("[R2T][BG] pob inject failed:", e);
