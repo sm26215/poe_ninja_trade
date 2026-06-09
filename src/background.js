@@ -461,6 +461,13 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
             return (mask_list.get(String(key)) === "check");
         }
 
+        // PoE2：從詞綴字串取出實際 roll 值，作為 trade 的 value.min。
+        // 僅在恰有單一數值時採用；多值（如「Adds X to Y Damage」）意義不明確，維持只比對詞綴存在。
+        function extract_roll_value(mod_string) {
+            const nums = (mod_string.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+            return nums.length === 1 ? nums[0] : undefined;
+        }
+
         if (is_gem) return undefined;
 
         let item_stats = [{
@@ -494,6 +501,8 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
                 const target_index = mod_type === "mutated" ? "explicitMods" : mod_type_index;
                 const mod_ids = res[target_index];
                 const value = res["value"];
+                // PoE2 才額外帶上實際 roll 值（min）；PoE1 維持原本只比對詞綴存在的行為
+                const roll = is_poe2 ? extract_roll_value(mod) : undefined;
 
                 if (!mod_ids) {
                     dbg_warn(item_inventoryId);
@@ -506,8 +515,9 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
                 if (mod_ids.length > 1) {
                     const filters = [];
                     for (const mod_id of mod_ids) {
-                        if (!value) filters.push({ id: mod_id, disabled: disabled });
-                        else filters.push({ id: mod_id, value: { min: value }, disabled: disabled });
+                        if (value) filters.push({ id: mod_id, value: { min: value }, disabled: disabled });
+                        else if (roll !== undefined) filters.push({ id: mod_id, value: { min: roll }, disabled: disabled });
+                        else filters.push({ id: mod_id, disabled: disabled });
                     }
 
                     item_stats.push({
@@ -518,6 +528,7 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
                 } else {
                     if (value && value === 100) item_stats[0].filters.push({ id: mod_ids[0], value: { min: value }, disabled: disabled });
                     else if (value) item_stats[0].filters.push({ id: mod_ids[0], option: value, disabled: disabled });
+                    else if (roll !== undefined) item_stats[0].filters.push({ id: mod_ids[0], value: { min: roll }, disabled: disabled });
                     else item_stats[0].filters.push({ id: mod_ids[0], disabled: disabled });
                 }
                 dbg_log("[SUCCESS] id=" + mod_ids[0] + ", value=" + value + ", mod_string='" + mod + "'");
