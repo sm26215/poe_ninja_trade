@@ -33,6 +33,10 @@ class LocalDataLoader {
         ) {
             return true;
         }
+        // poe2_bases 由舊版的陣列改為 {base: ItemClass} 物件，舊快取需重載以取得 Item Class
+        if (Array.isArray(poe2_bases_data)) {
+            return true;
+        }
         return false;
     }
 

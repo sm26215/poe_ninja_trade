@@ -1070,7 +1070,7 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
  * 集中放在頁面右上角的自帶面板。連結會帶上「名稱/底材 + 可對應到的 explicit mod stats」。
  * 不經 webRequest（該請求在頁面載入早期觸發，MV3 service worker 常來不及攔截）。
  * @param {Object} poe2_stats Exiled Exchange 2 的 PoE2 詞綴表（last-two-words -> matchers）
- * @param {string[]} poe2_bases PoE2 底材名稱清單，用於還原魔法物品的底材
+ * @param {Object} poe2_bases PoE2 底材 -> Item Class 對照表（鍵亦用於還原魔法物品的底材）
  * @param {string[]} poe2_gems PoE2 可交易寶石名稱清單，用於過濾技能組裡的寶石
  * @return {None}
  */
@@ -1078,7 +1078,8 @@ async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
     const PANEL_ID = "r2t-pob-panel";
     console.log("[R2T][PAGE] inject_pob_panel start");
 
-    const bases_set = new Set(poe2_bases || []);
+    const bases_map = poe2_bases || {};
+    const bases_set = new Set(Object.keys(bases_map)); // 底材名稱集合（魔法物品底材還原用）
     const gems_set = new Set(poe2_gems || []);
     // 魔法物品名稱為「字首 + 底材 + of 字尾」，PoB 不另存底材。先去掉 " of 字尾"，
     // 再用 bases_set 取最長的「字尾相符底材」（從整串往後縮，第一個命中的即最長底材）。
@@ -1174,7 +1175,10 @@ async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
         const next = raw[i + 1] || "";
         const base = is_magic ? (extract_magic_base(name) || name) : ((next && !next.includes(":")) ? next : name);
 
-        const header = ["Rarity: " + title_case(rarity_raw)];
+        const header = [];
+        const item_class = bases_map[base];           // PoE 官方格式第一行為 Item Class
+        if (item_class) header.push("Item Class: " + item_class);
+        header.push("Rarity: " + title_case(rarity_raw));
         if (rarity_raw !== "NORMAL" && !is_magic && name && base && name !== base) header.push(name);
         header.push(base);
 
