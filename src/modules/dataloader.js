@@ -4,6 +4,7 @@ class LocalDataLoader {
     static STATS_DATA_PATH = "./data/awakened poe trade/en_stats.min.json";
     static POE2_STATS_DATA_PATH = "./data/exiled exchange 2/poe2_stats.min.json";
     static POE2_BASES_DATA_PATH = "./data/exiled exchange 2/poe2_bases.min.json";
+    static POE2_GEMS_DATA_PATH = "./data/poe2_gems.min.json";
     static GEMS_DATA_PATH = "./data/com_preprocessed_gems_data.json";
     static TW_GEMS_DATA_PATH = "./data/tw_preprocessed_gems_data.json";
     static QUERY_PATH = "./data/query.json";
@@ -23,10 +24,12 @@ class LocalDataLoader {
         const query_data = await get_status("local_query_data");
         const poe2_stats_data = await get_status("local_poe2_stats_data");
         const poe2_bases_data = await get_status("local_poe2_bases_data");
+        const poe2_gems_data = await get_status("local_poe2_gems_data");
         if (
             query_data === undefined || query_data === null ||
             poe2_stats_data === undefined || poe2_stats_data === null ||
-            poe2_bases_data === undefined || poe2_bases_data === null
+            poe2_bases_data === undefined || poe2_bases_data === null ||
+            poe2_gems_data === undefined || poe2_gems_data === null
         ) {
             return true;
         }
@@ -51,6 +54,7 @@ class LocalDataLoader {
             local_stats_data: LocalDataLoader.STATS_DATA_PATH,
             local_poe2_stats_data: LocalDataLoader.POE2_STATS_DATA_PATH,
             local_poe2_bases_data: LocalDataLoader.POE2_BASES_DATA_PATH,
+            local_poe2_gems_data: LocalDataLoader.POE2_GEMS_DATA_PATH,
             local_gems_data: LocalDataLoader.GEMS_DATA_PATH,
             local_tw_gems_data: LocalDataLoader.TW_GEMS_DATA_PATH,
             local_query_data: LocalDataLoader.QUERY_PATH,

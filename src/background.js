@@ -1071,13 +1071,15 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
  * 不經 webRequest（該請求在頁面載入早期觸發，MV3 service worker 常來不及攔截）。
  * @param {Object} poe2_stats Exiled Exchange 2 的 PoE2 詞綴表（last-two-words -> matchers）
  * @param {string[]} poe2_bases PoE2 底材名稱清單，用於還原魔法物品的底材
+ * @param {string[]} poe2_gems PoE2 可交易寶石名稱清單，用於過濾技能組裡的寶石
  * @return {None}
  */
-async function inject_pob_panel(poe2_stats, poe2_bases) {
+async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
     const PANEL_ID = "r2t-pob-panel";
     console.log("[R2T][PAGE] inject_pob_panel start");
 
     const bases_set = new Set(poe2_bases || []);
+    const gems_set = new Set(poe2_gems || []);
     // 魔法物品名稱為「字首 + 底材 + of 字尾」，PoB 不另存底材。先去掉 " of 字尾"，
     // 再用 bases_set 取最長的「字尾相符底材」（從整串往後縮，第一個命中的即最長底材）。
     function extract_magic_base(name) {
@@ -1203,9 +1205,32 @@ async function inject_pob_panel(poe2_stats, poe2_bases) {
         }
     }
 
-    console.log(`[R2T][PAGE] pob parsed: ${Object.keys(item_by_id).length} items total, ${equipped.length} equipped (activeItemSet=${active_id})`);
-    if (equipped.length === 0) {
-        console.log("[R2T][PAGE] no equipped items parsed — aborting panel");
+    // 解析現用技能組（activeSkillSet）裡的寶石：過濾成真正可交易的寶石並去重
+    const skills_root = doc.querySelector("Skills");
+    const active_skill_id = skills_root ? skills_root.getAttribute("activeSkillSet") : null;
+    let active_skill_set = active_skill_id ? doc.querySelector(`SkillSet[id="${active_skill_id}"]`) : null;
+    if (!active_skill_set) active_skill_set = doc.querySelector("SkillSet");
+
+    const gems = [];
+    const seen_gem_names = new Set();
+    if (active_skill_set) {
+        for (const gem of active_skill_set.querySelectorAll("Gem")) {
+            const name = gem.getAttribute("nameSpec");
+            if (!name || gem.getAttribute("enabled") === "false") continue;
+            // 只收清單中真正可交易的寶石（排除武器內建技能等），並去重
+            if (!gems_set.has(name) || seen_gem_names.has(name)) continue;
+            seen_gem_names.add(name);
+            gems.push({
+                name,
+                level: parseInt(gem.getAttribute("level") || "0", 10),
+                quality: parseInt(gem.getAttribute("quality") || "0", 10),
+            });
+        }
+    }
+
+    console.log(`[R2T][PAGE] pob parsed: ${equipped.length} equipped items (activeItemSet=${active_id}), ${gems.length} gems (activeSkillSet=${active_skill_id})`);
+    if (equipped.length === 0 && gems.length === 0) {
+        console.log("[R2T][PAGE] no equipped items or gems parsed — aborting panel");
         return;
     }
 
@@ -1232,6 +1257,18 @@ async function inject_pob_panel(poe2_stats, poe2_bases) {
         return { url: `${POE2_TRADE_URL}?q=${JSON.stringify(query)}`, matched: filters.length, total: (item.mods || []).length };
     }
 
+    // 寶石以名稱(type)搜尋，並帶上等級/品質作為 min。
+    // 注意 trade2 結構：gem_level 在 misc_filters，quality 在 type_filters（與 PoE1 不同）。
+    function build_gem_url(gem) {
+        const query = { query: { type: gem.name }, sort: { price: "asc" } };
+        if (trade_type) query.query.status = { option: trade_type };
+        const filters = {};
+        if (gem.level > 1) filters.misc_filters = { filters: { gem_level: { min: gem.level } } };
+        if (gem.quality > 0) filters.type_filters = { filters: { quality: { min: gem.quality } } };
+        if (Object.keys(filters).length) query.query.filters = filters;
+        return `${POE2_TRADE_URL}?q=${JSON.stringify(query)}`;
+    }
+
     // 移除舊面板（重複注入時）
     const old = document.getElementById(PANEL_ID);
     if (old) old.remove();
@@ -1249,7 +1286,7 @@ async function inject_pob_panel(poe2_stats, poe2_bases) {
     const header = document.createElement("div");
     header.setAttribute("style", "display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-weight:600;");
     const title = document.createElement("span");
-    title.textContent = `Trade (PoB) — ${equipped.length} items`;
+    title.textContent = `Trade (PoB) — ${equipped.length} items, ${gems.length} gems`;
     const close = document.createElement("span");
     close.textContent = "✕";
     close.setAttribute("style", "cursor:pointer;padding:0 4px;color:#aaa;");
@@ -1290,8 +1327,43 @@ async function inject_pob_panel(poe2_stats, poe2_bases) {
         panel.appendChild(row);
     }
 
+    // 寶石區段
+    if (gems.length) {
+        const divider = document.createElement("div");
+        divider.setAttribute("style", "margin-top:8px;padding-top:6px;border-top:2px solid #555;font-weight:600;color:#cba6f7;");
+        divider.textContent = `Gems — ${gems.length}`;
+        panel.appendChild(divider);
+
+        for (const gem of gems) {
+            const row = document.createElement("div");
+            row.setAttribute("style", "display:flex;justify-content:space-between;align-items:center;gap:6px;padding:4px 0;border-top:1px solid #333;");
+
+            const label = document.createElement("div");
+            label.setAttribute("style", "min-width:0;overflow:hidden;");
+            const top = document.createElement("div");
+            top.setAttribute("style", "color:#cba6f7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;");
+            top.textContent = gem.name;
+            const sub = document.createElement("div");
+            sub.setAttribute("style", "color:#888;font-size:11px;");
+            sub.textContent = `Lv ${gem.level}${gem.quality > 0 ? " · Q" + gem.quality : ""}`;
+            label.appendChild(top);
+            label.appendChild(sub);
+
+            const btn = document.createElement("a");
+            btn.textContent = "Trade";
+            btn.href = build_gem_url(gem);
+            btn.target = "_blank";
+            btn.rel = "noopener";
+            btn.setAttribute("style", "flex:none;background:#2a6;color:#fff;text-decoration:none;padding:3px 8px;border-radius:4px;cursor:pointer;");
+
+            row.appendChild(label);
+            row.appendChild(btn);
+            panel.appendChild(row);
+        }
+    }
+
     document.body.appendChild(panel);
-    console.log(`[R2T][PAGE] pob panel injected: ${equipped.length} items, ${total_matched} mod-stats resolved total`);
+    console.log(`[R2T][PAGE] pob panel injected: ${equipped.length} items (${total_matched} mod-stats), ${gems.length} gems`);
 }
 
 // 初始化所需設定
@@ -1326,12 +1398,13 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         await local_loader.update_data();
         const poe2_stats = await local_loader.get_data("local_poe2_stats_data");
         const poe2_bases = await local_loader.get_data("local_poe2_bases_data");
+        const poe2_gems = await local_loader.get_data("local_poe2_gems_data");
 
         console.log(`[R2T][BG] pob page detected, injecting: ${tab.url}`);
         chrome.scripting.executeScript({
             target: { tabId },
             function: inject_pob_panel,
-            args: [poe2_stats, poe2_bases],
+            args: [poe2_stats, poe2_bases, poe2_gems],
         });
     } catch (e) {
         console.error("[R2T][BG] pob inject failed:", e);
