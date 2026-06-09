@@ -5,8 +5,11 @@ const API_URLS_FILTER = {
     urls: [
         "https://poe.ninja/poe1/api/builds/*/character?*",
         "https://poe.ninja/poe1/api/profile/characters/*",
-        // "https://poe.ninja/poe2/api/builds/*/character?*",
-        // "https://poe.ninja/poe2/api/profile/characters/*"
+        // NOTE: PoE2 patterns mirror the PoE1 ones (poe.ninja is one SPA using the
+        // same internal API shape per realm). If your captured PoE2 equipment-data
+        // URL differs, add/adjust the exact pattern here.
+        "https://poe.ninja/poe2/api/builds/*/character?*",
+        "https://poe.ninja/poe2/api/profile/characters/*"
     ]
 };
 
@@ -62,7 +65,13 @@ async function fetch_character_data(details) {
     if (details.tabId === -1) return;
 
     const api_url = details.url;
+
+    // 偵測目前是 PoE1 還是 PoE2 的 API 請求（poe.ninja 的網址中含有 /poe2/ 即為 PoE2）
+    const game = api_url.includes("/poe2/") ? "poe2" : "poe1";
+    console.log(`[R2T][BG] webRequest filter matched (game=${game}): ${api_url}`);
+
     const equipment_data = await fetch_url(api_url);
+    console.log(`[R2T][BG] fetch success (game=${game}), equipment_data:`, equipment_data);
 
     const local_loader = new LocalDataLoader();
     const online_loader = new OnlineDataLoader();
@@ -77,6 +86,8 @@ async function fetch_character_data(details) {
     const query_data = await local_loader.get_data("local_query_data");
     const gems_query_data = await local_loader.get_data("local_gems_query_data");
 
+    console.log(`[R2T][BG] injection start (game=${game}), tabId=${details.tabId}`);
+
     if (await get_status("mods-file-mode") === "online") {
         try {
             chrome.scripting.executeScript({
@@ -88,7 +99,8 @@ async function fetch_character_data(details) {
                     await online_loader.get_data("online_tw_gems_data"),
                     query_data,
                     gems_query_data,
-                    equipment_data
+                    equipment_data,
+                    game
                 ],
             });
         } catch (e) {
@@ -102,7 +114,8 @@ async function fetch_character_data(details) {
                     await local_loader.get_data("local_tw_gems_data"),
                     query_data,
                     gems_query_data,
-                    equipment_data
+                    equipment_data,
+                    game
                 ],
             });
         }
@@ -116,7 +129,8 @@ async function fetch_character_data(details) {
                 await local_loader.get_data("local_tw_gems_data"),
                 query_data,
                 gems_query_data,
-                equipment_data
+                equipment_data,
+                game
             ],
         });
     }
@@ -132,9 +146,13 @@ async function fetch_character_data(details) {
  * @param {Object} equipment_data 抓取到的角色裝備資料，內容來源為 poe.ninja，但格式是 POE 官方定義的
  * @return {None}
  */
-async function inject_script(stats_data, gems_data, tw_gems_data, query_data, gems_query_data, equipment_data) {
+async function inject_script(stats_data, gems_data, tw_gems_data, query_data, gems_query_data, equipment_data, game) {
     function dbg_log(msg) { if (is_debugging) console.log(msg); }
     function dbg_warn(msg) { if (is_debugging) console.warn(msg); }
+
+    // game 由 background 傳入，"poe1" 或 "poe2"；舊版呼叫未帶此參數時預設 poe1
+    const is_poe2 = game === "poe2";
+    console.log(`[R2T][PAGE] inject_script start (game=${game || "poe1"})`);
 
     const is_debugging = (await chrome.storage.local.get(["debug"]))["debug"] === "on";
     const redirect_to = (await chrome.storage.local.get(["redirect-to"]))["redirect-to"];
@@ -162,7 +180,10 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         await chrome.storage.local.remove("show_update_popup");
     }
 
-    const POE_TRADE_URL = `https://www.pathofexile.${redirect_to}/trade/search`;
+    // PoE1: /trade/search ；PoE2: /trade2/search/poe2（poe2 為 realm 區段，省略 league 時導向預設聯盟）
+    const POE_TRADE_URL = is_poe2
+        ? `https://www.pathofexile.${redirect_to}/trade2/search/poe2`
+        : `https://www.pathofexile.${redirect_to}/trade/search`;
     const BALANCE_ICON = `<path xmlns="http://www.w3.org/2000/svg" d="M14.6302 7L13.0002 3H14.0002V2H9.00024V1H8.00024V2H3.00024V3H4.00024L2.38024 7H2.00024V8H2.15024C2.30663 8.49791 2.623 8.93028 3.05024 9.23C3.47189 9.53576 3.9794 9.7004 4.50024 9.7004C5.02108 9.7004 5.5286 9.53576 5.95024 9.23C6.3776 8.92817 6.69663 8.49696 6.86024 8H7.00024V7H6.55024L4.88024 3H8.00024V11H6.00024L5.61024 11.18L3.61024 13.69L4.00024 14.5H13.0002L13.3902 13.69L11.3902 11.18L11.0002 11H9.00024V3H12.1302L10.4602 7H10.0002V8H10.1502C10.3138 8.49544 10.6294 8.92668 11.0522 9.23236C11.4751 9.53804 11.9835 9.70258 12.5052 9.70258C13.027 9.70258 13.5354 9.53804 13.9582 9.23236C14.3811 8.92668 14.6967 8.49544 14.8602 8H15.0002V7H14.6302ZM5.22024 8.51C4.99971 8.63205 4.75229 8.69734 4.50024 8.7C4.25119 8.69869 4.00667 8.63326 3.79024 8.51C3.56955 8.38903 3.38362 8.21342 3.25024 8H5.75024C5.61799 8.21083 5.436 8.38595 5.22024 8.51ZM5.47024 7H3.47024L4.47024 4.6L5.47024 7ZM10.7602 12L12.0002 13.5H5.00024L6.24024 12H10.7602ZM12.5402 4.62L13.5402 7.02H11.5402L12.5402 4.62ZM13.2202 8.53C13.0016 8.65671 12.7529 8.72233 12.5002 8.72V8.72C12.2506 8.72355 12.0048 8.65778 11.7902 8.53C11.5692 8.40065 11.3837 8.21856 11.2502 8H13.7502C13.6263 8.2225 13.4427 8.40604 13.2202 8.53V8.53Z" fill="#424242"/>`;
     const CHECK_ICON = `<path fill-rule="evenodd" clip-rule="evenodd" d="M14.4315 3.3232L5.96151 13.3232L5.1708 13.2874L1.8208 8.5174L2.63915 7.94268L5.61697 12.1827L13.6684 2.67688L14.4315 3.3232Z" fill="#388A34"/>`;
     const CROSS_ICON = `<path fill-rule="evenodd" clip-rule="evenodd" d="M8.00028 8.70711L11.6467 12.3536L12.3538 11.6465L8.70739 8.00001L12.3538 4.35356L11.6467 3.64645L8.00028 7.2929L4.35384 3.64645L3.64673 4.35356L7.29317 8.00001L3.64673 11.6465L4.35384 12.3536L8.00028 8.70711Z" fill="#E51400"/>`;
@@ -398,7 +419,10 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         new_node.addEventListener("click", () => {
             update_mask_list(node, mask_list);
             let url = "";
-            if (is_gem) {
+            if (is_poe2) {
+                // 里程碑 1：PoE2 僅以物品名稱/底材搜尋，先不帶 mod 篩選（PoE2 stat DB 與 PoE1 不同）
+                url = `${POE_TRADE_URL}?q=${gen_poe2_name_query(item_data)}`;
+            } else if (is_gem) {
                 let gem_name = "";
                 if (item_data.name) gem_name += item_data.name + " ";
                 if (item_data.typeLine) gem_name += item_data.typeLine;
@@ -616,6 +640,23 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
 
     function gen_status() {
         return { option: trade_type };
+    }
+
+    // PoE2 里程碑 1：只用名稱/底材搜尋，不帶任何 mod/filter。
+    // item_data.name 為唯一物品名稱（一般物品為空），typeLine 為底材名稱。
+    function gen_poe2_name_query(item_data) {
+        let res = {
+            query: {
+                status: gen_status(),
+            },
+            sort: { price: "asc" }
+        };
+
+        if (item_data && item_data["name"]) res.query.name = item_data["name"];
+        if (item_data && item_data["typeLine"]) res.query.type = item_data["typeLine"];
+
+        res = clean_empty_entries(res);
+        return JSON.stringify(res);
     }
 
     function gen_query(mask_list, item_data, is_gem) {
@@ -907,16 +948,21 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         const quality = get_item_quality(tippy_node);
 
         const item_info = get_item_data_by_node(tippy_node, item_name, level);
-        if (item_info === undefined) return;
+        if (item_info === undefined && !is_poe2) return;
 
-        const item_data = item_info.data;
-        const is_gem = item_info.is_gem;
+        // PoE2 里程碑 1：即使在 equipment_data 找不到對應物品（資料結構可能不同），
+        // 仍以 tippy 標題的物品名稱做為底材，確保按鈕注入端到端可運作。
+        const item_data = item_info ? item_info.data : { typeLine: item_name };
+        const is_gem = item_info ? item_info.is_gem : false;
 
         // 使用官方資料庫的唯一 id，若無則降級為組合屬性
         const cache_key = item_data.id ? item_data.id : (item_name + "_" + (item_data.ilvl || "") + "_" + JSON.stringify(item_data.explicitMods || []));
 
+        // PoE2 里程碑 1 不帶 mod 篩選，故不需要 mask_list（item_data 也可能沒有 properties）。
         let mask_list;
-        if (global_mask_cache.has(cache_key)) {
+        if (is_poe2) {
+            mask_list = new Map();
+        } else if (global_mask_cache.has(cache_key)) {
             mask_list = global_mask_cache.get(cache_key);
         } else {
             mask_list = gen_mask_list(item_data, is_gem);
@@ -924,15 +970,23 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         }
 
         const article_div = tippy_node.querySelector("article > div");
-        if (!article_div) return;
-        const mask_target = get_all_deepest_div(article_div);
+        if (!article_div) {
+            console.log(`[R2T][PAGE] selector NOT found ("article > div") for "${item_name}" — skipping injection`);
+            return;
+        }
+        console.log(`[R2T][PAGE] selector found ("article > div") for "${item_name}" (game=${game || "poe1"})`);
 
-        const button_keys = Array.from(mask_list.keys());
-        const button_values = Array.from(mask_list.values());
-        for (var i = 0; i < mask_list.size; i++) {
-            if (mask_target[i]) {
-                const toggle_btn = gen_toggle_botton(button_keys[i], button_values[i], mask_list);
-                mask_target[i].prepend(toggle_btn);
+        // 只有 PoE1 才注入每條 mod 的開關按鈕；PoE2 里程碑 1 只放 Trade 按鈕
+        if (!is_poe2) {
+            const mask_target = get_all_deepest_div(article_div);
+
+            const button_keys = Array.from(mask_list.keys());
+            const button_values = Array.from(mask_list.values());
+            for (var i = 0; i < mask_list.size; i++) {
+                if (mask_target[i]) {
+                    const toggle_btn = gen_toggle_botton(button_keys[i], button_values[i], mask_list);
+                    mask_target[i].prepend(toggle_btn);
+                }
             }
         }
 
@@ -942,10 +996,28 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         if (last_div) last_div.prepend(trade_button);
     }
 
+    // poe.ninja（PoE1 與 PoE2 共用同一套 floating-ui/tippy 框架）會把彈出視窗
+    // 掛在 div[data-floating-ui-portal] 之下。SPA 可能在注入時尚未產生此容器。
+    const PORTAL_SELECTOR = "div[data-floating-ui-portal]";
+
+    // 將 tippy_observer 掛到指定 portal，並處理其中已存在的彈出視窗
+    function observe_portal(portal) {
+        console.log(`[R2T][PAGE] portal container found ("${PORTAL_SELECTOR}") — observing`);
+        tippy_observer.observe(portal, { childList: true });
+        for (const child of portal.children) {
+            process_tippy(child);
+        }
+    }
+
     const tippy_observer = new MutationObserver(mutationRecords => {
         for (const mutationRecord of mutationRecords) {
             for (const addedNode of mutationRecord["addedNodes"]) {
                 process_tippy(addedNode);
+
+                // 若 portal 容器是後來才被建立的，動態補掛 observer（SPA 延遲渲染的重試機制）
+                if (addedNode.nodeType === 1 && addedNode.matches && addedNode.matches(PORTAL_SELECTOR)) {
+                    observe_portal(addedNode);
+                }
             }
         }
     });
@@ -954,16 +1026,14 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         childList: true
     });
 
-    const portal = document.querySelector("div[data-floating-ui-portal]");
-    if (portal) {
-        tippy_observer.observe(portal, {
-            childList: true
-        });
-    }
-
-    const existing_tippies = document.querySelectorAll("div[data-floating-ui-portal]");
-    for (const tippy of existing_tippies) {
-        process_tippy(tippy);
+    const existing_portals = document.querySelectorAll(PORTAL_SELECTOR);
+    if (existing_portals.length > 0) {
+        for (const portal of existing_portals) {
+            observe_portal(portal);
+            process_tippy(portal);
+        }
+    } else {
+        console.log(`[R2T][PAGE] portal container NOT found yet ("${PORTAL_SELECTOR}") — MutationObserver will retry on render`);
     }
 };
 
