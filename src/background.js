@@ -1151,6 +1151,84 @@ async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
         return null;
     }
 
+    // 將 PoB 物品還原成 PoE 官方「複製物品」文字格式（區段以 -------- 分隔）。
+    // 處理：去除 PoB 註記({variant}{range}{tags})、依 Selected Variant 過濾唯一物品詞綴、
+    // 以 <ModRange> 比例把 (a-b) 範圍還原成實際 roll、implicit 標註 "(implicit)"。
+    function title_case(s) { return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase(); }
+
+    function build_official_item_text(node) {
+        const mod_ranges = {};
+        for (const mr of node.querySelectorAll("ModRange")) {
+            mod_ranges[mr.getAttribute("id")] = parseFloat(mr.getAttribute("range"));
+        }
+        const raw = node.textContent.split("\n").map(s => s.trim()).filter(Boolean);
+        if (!raw.length) return "";
+
+        const sel_variant = (raw.find(l => /^Selected Variant:/.test(l)) || "").match(/(\d+)/);
+        const sel = sel_variant ? sel_variant[1] : null;
+
+        let i = 0, rarity_raw = "NORMAL";
+        if (raw[0].startsWith("Rarity:")) { rarity_raw = raw[0].slice(7).trim().toUpperCase(); i = 1; }
+        const is_magic = rarity_raw === "MAGIC";
+        const name = raw[i] || "";
+        const next = raw[i + 1] || "";
+        const base = is_magic ? (extract_magic_base(name) || name) : ((next && !next.includes(":")) ? next : name);
+
+        const header = ["Rarity: " + title_case(rarity_raw)];
+        if (rarity_raw !== "NORMAL" && !is_magic && name && base && name !== base) header.push(name);
+        header.push(base);
+
+        const imp_idx = raw.findIndex(l => /^Implicits:\s*\d+/.test(l));
+        const n_imp = imp_idx !== -1 ? (parseInt(raw[imp_idx].match(/\d+/)[0], 10) || 0) : 0;
+        const header_end = imp_idx !== -1 ? imp_idx : raw.length;
+
+        const PROP = { "Armour": "Armour", "Evasion": "Evasion Rating", "Energy Shield": "Energy Shield", "Ward": "Ward", "Spirit": "Spirit" };
+        const props = [];
+        let level_req = null, item_level = null;
+        const scan_start = i + ((base === next) ? 2 : 1);
+        for (let k = scan_start; k < header_end; k++) {
+            const l = raw[k]; let m;
+            if (/^(Crafted:|Prefix:|Suffix:|Unique ID:|Variant:|Selected Variant:|Sockets:|Rune:)/.test(l)) continue;
+            if ((m = l.match(/^Quality:\s*(\d+)/))) { if (+m[1] > 0) props.push("Quality: +" + m[1] + "%"); continue; }
+            if ((m = l.match(/^Item Level:\s*(\d+)/))) { item_level = m[1]; continue; }
+            if ((m = l.match(/^LevelReq:\s*(\d+)/))) { level_req = m[1]; continue; }
+            for (const p in PROP) { const mm = l.match(new RegExp("^" + p + ":\\s*(\\d+)")); if (mm) { props.push(PROP[p] + ": " + mm[1]); break; } }
+        }
+
+        function clean_mod(line, num) {
+            const vm = line.match(/\{variant:([\d,]+)\}/);
+            if (vm && sel && !vm[1].split(",").includes(sel)) return null; // 非選定變體，略過
+            let s = line.replace(/^(\{[^}]*\})+/, "").trim();              // 去除前綴註記
+            const frac = mod_ranges[String(num)];
+            if (frac !== undefined) {
+                s = s.replace(/\((\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\)/g,
+                    (x, a, b) => String(Math.round(parseFloat(a) + frac * (parseFloat(b) - parseFloat(a)))));
+            }
+            return s;
+        }
+
+        const mod_lines = imp_idx !== -1 ? raw.slice(imp_idx + 1) : [];
+        const implicits = [], explicits = [], flags = [];
+        let num = 0;
+        for (let k = 0; k < mod_lines.length; k++) {
+            num++; // <ModRange> id 為 1-based，對應所有詞綴行的順序
+            const c = clean_mod(mod_lines[k], num);
+            if (c === null) continue;
+            if (/^(Corrupted|Mirrored|Split|Synthesised)$/i.test(c)) { flags.push(c); continue; }
+            if (k < n_imp) implicits.push(c + " (implicit)");
+            else explicits.push(c);
+        }
+
+        const sections = [header];
+        if (props.length) sections.push(props);
+        if (level_req) sections.push(["Requirements:", "Level: " + level_req]);
+        if (item_level) sections.push(["Item Level: " + item_level]);
+        if (implicits.length) sections.push(implicits);
+        if (explicits.length) sections.push(explicits);
+        if (flags.length) sections.push(flags);
+        return sections.map(s => s.join("\n")).join("\n--------\n");
+    }
+
     // 從 PoB 物品文字取出「實際 explicit mod」：在 "Implicits: N" 之後、跳過 N 行 implicit，其餘為 explicit
     function parse_item_node(node) {
         const lines = node.textContent.split("\n").map(s => s.trim()).filter(Boolean);
@@ -1174,7 +1252,7 @@ async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
                 // 略過物品旗標行（非詞綴，trade 用獨立 filter 表示）
                 .filter(l => !/^(Corrupted|Mirrored|Split|Synthesised|Fractured Item)$/i.test(l));
         }
-        return { rarity, name, base, mods };
+        return { rarity, name, base, mods, official: build_official_item_text(node) };
     }
 
     const item_by_id = {};
@@ -1340,15 +1418,40 @@ async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
         label.appendChild(top);
         label.appendChild(sub);
 
+        const actions = document.createElement("div");
+        actions.setAttribute("style", "flex:none;display:flex;gap:4px;");
+
+        // 複製成 PoE 官方「複製物品」文字格式
+        const copy_btn = document.createElement("button");
+        copy_btn.textContent = "Copy";
+        copy_btn.setAttribute("style", "background:#36c;color:#fff;border:none;padding:3px 8px;border-radius:4px;cursor:pointer;font:inherit;");
+        copy_btn.addEventListener("click", async () => {
+            const text = item.official || "";
+            try {
+                await navigator.clipboard.writeText(text);
+            } catch (e) {
+                const ta = document.createElement("textarea");
+                ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+                document.body.appendChild(ta); ta.select();
+                try { document.execCommand("copy"); } catch (e2) { /* noop */ }
+                ta.remove();
+            }
+            copy_btn.textContent = "Copied!";
+            setTimeout(() => { copy_btn.textContent = "Copy"; }, 1200);
+        });
+
         const btn = document.createElement("a");
         btn.textContent = "Trade";
         btn.href = url;
         btn.target = "_blank";
         btn.rel = "noopener";
-        btn.setAttribute("style", "flex:none;background:#2a6;color:#fff;text-decoration:none;padding:3px 8px;border-radius:4px;cursor:pointer;");
+        btn.setAttribute("style", "background:#2a6;color:#fff;text-decoration:none;padding:3px 8px;border-radius:4px;cursor:pointer;");
+
+        actions.appendChild(copy_btn);
+        actions.appendChild(btn);
 
         row.appendChild(label);
-        row.appendChild(btn);
+        row.appendChild(actions);
         panel.appendChild(row);
         return matched;
     }
