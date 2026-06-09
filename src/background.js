@@ -1228,9 +1228,28 @@ async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
         }
     }
 
-    console.log(`[R2T][PAGE] pob parsed: ${equipped.length} equipped items (activeItemSet=${active_id}), ${gems.length} gems (activeSkillSet=${active_skill_id})`);
-    if (equipped.length === 0 && gems.length === 0) {
-        console.log("[R2T][PAGE] no equipped items or gems parsed — aborting panel");
+    // 珠寶：插在天賦樹插槽，不在裝備欄。<Tree activeSpec="N"> 的 activeSpec 為 1-based 索引，
+    // 對應第 N 個 <Spec>，其中 <Socket itemId=".."/> 的 itemId 即該插槽的珠寶物品。
+    const tree_root = doc.querySelector("Tree");
+    const active_spec_n = tree_root ? parseInt(tree_root.getAttribute("activeSpec") || "0", 10) : 0;
+    const specs = doc.querySelectorAll("Spec");
+    const active_spec = (active_spec_n >= 1 && active_spec_n <= specs.length) ? specs[active_spec_n - 1] : null;
+
+    const jewels = [];
+    const seen_jewel_ids = new Set();
+    if (active_spec) {
+        for (const socket of active_spec.querySelectorAll("Socket")) {
+            const item_id = socket.getAttribute("itemId");
+            if (!item_id || item_id === "0" || seen_jewel_ids.has(item_id)) continue;
+            seen_jewel_ids.add(item_id);
+            const it = item_by_id[item_id];
+            if (it) jewels.push({ slot: "Jewel", ...it }); // 珠寶為一般物品，沿用 item 解析/連結
+        }
+    }
+
+    console.log(`[R2T][PAGE] pob parsed: ${equipped.length} items (activeItemSet=${active_id}), ${jewels.length} jewels (activeSpec=${active_spec_n}), ${gems.length} gems (activeSkillSet=${active_skill_id})`);
+    if (equipped.length === 0 && jewels.length === 0 && gems.length === 0) {
+        console.log("[R2T][PAGE] nothing parsed — aborting panel");
         return;
     }
 
@@ -1286,7 +1305,7 @@ async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
     const header = document.createElement("div");
     header.setAttribute("style", "display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-weight:600;");
     const title = document.createElement("span");
-    title.textContent = `Trade (PoB) — ${equipped.length} items, ${gems.length} gems`;
+    title.textContent = `Trade (PoB) — ${equipped.length} items, ${jewels.length} jewels, ${gems.length} gems`;
     const close = document.createElement("span");
     close.textContent = "✕";
     close.setAttribute("style", "cursor:pointer;padding:0 4px;color:#aaa;");
@@ -1295,10 +1314,16 @@ async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
     header.appendChild(close);
     panel.appendChild(header);
 
-    let total_matched = 0;
-    for (const item of equipped) {
+    function append_divider(text) {
+        const divider = document.createElement("div");
+        divider.setAttribute("style", "margin-top:8px;padding-top:6px;border-top:2px solid #555;font-weight:600;color:#cba6f7;");
+        divider.textContent = text;
+        panel.appendChild(divider);
+    }
+
+    // 物品/珠寶共用的列渲染（兩者皆為一般物品），回傳對應到的 mod 數
+    function append_item_row(item) {
         const { url, matched, total } = build_trade_url(item);
-        total_matched += matched;
 
         const row = document.createElement("div");
         row.setAttribute("style", "display:flex;justify-content:space-between;align-items:center;gap:6px;padding:4px 0;border-top:1px solid #333;");
@@ -1325,14 +1350,21 @@ async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
         row.appendChild(label);
         row.appendChild(btn);
         panel.appendChild(row);
+        return matched;
+    }
+
+    let total_matched = 0;
+    for (const item of equipped) total_matched += append_item_row(item);
+
+    // 珠寶區段（沿用 item 列渲染）
+    if (jewels.length) {
+        append_divider(`Jewels — ${jewels.length}`);
+        for (const jewel of jewels) total_matched += append_item_row(jewel);
     }
 
     // 寶石區段
     if (gems.length) {
-        const divider = document.createElement("div");
-        divider.setAttribute("style", "margin-top:8px;padding-top:6px;border-top:2px solid #555;font-weight:600;color:#cba6f7;");
-        divider.textContent = `Gems — ${gems.length}`;
-        panel.appendChild(divider);
+        append_divider(`Gems — ${gems.length}`);
 
         for (const gem of gems) {
             const row = document.createElement("div");
@@ -1363,7 +1395,7 @@ async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
     }
 
     document.body.appendChild(panel);
-    console.log(`[R2T][PAGE] pob panel injected: ${equipped.length} items (${total_matched} mod-stats), ${gems.length} gems`);
+    console.log(`[R2T][PAGE] pob panel injected: ${equipped.length} items, ${jewels.length} jewels (${total_matched} mod-stats), ${gems.length} gems`);
 }
 
 // 初始化所需設定
