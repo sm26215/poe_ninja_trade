@@ -5,8 +5,13 @@ const API_URLS_FILTER = {
     urls: [
         "https://poe.ninja/poe1/api/builds/*/character?*",
         "https://poe.ninja/poe1/api/profile/characters/*",
-        // "https://poe.ninja/poe2/api/builds/*/character?*",
-        // "https://poe.ninja/poe2/api/profile/characters/*"
+        // PoE2 character build pages (same JSON shape as PoE1, if/when present).
+        "https://poe.ninja/poe2/api/builds/*/character?*",
+        "https://poe.ninja/poe2/api/profile/characters/*"
+        // NOTE: PoE2 Path-of-Building share pages (/poe2/pob/<id>) are handled NOT
+        // via webRequest (the /poe2/pob/raw fetch fires too early in the page load
+        // for the MV3 service worker to reliably catch) but via a tabs.onUpdated
+        // listener that injects inject_pob_panel — see the bottom of this file.
     ]
 };
 
@@ -62,7 +67,14 @@ async function fetch_character_data(details) {
     if (details.tabId === -1) return;
 
     const api_url = details.url;
+
+    // 偵測目前是 PoE1 還是 PoE2 的 API 請求（poe.ninja 的網址中含有 /poe2/ 即為 PoE2）
+    const game = api_url.includes("/poe2/") ? "poe2" : "poe1";
+    const is_poe2 = game === "poe2";
+    console.log(`[R2T][BG] webRequest filter matched (game=${game}): ${api_url}`);
+
     const equipment_data = await fetch_url(api_url);
+    console.log(`[R2T][BG] fetch success (game=${game}), equipment_data:`, equipment_data);
 
     const local_loader = new LocalDataLoader();
     const online_loader = new OnlineDataLoader();
@@ -77,18 +89,25 @@ async function fetch_character_data(details) {
     const query_data = await local_loader.get_data("local_query_data");
     const gems_query_data = await local_loader.get_data("local_gems_query_data");
 
+    // PoE2 使用 Exiled Exchange 2 的詞綴表（與 PoE1 的 en_stats 不同庫），僅在 PoE2 時載入。
+    // 不論 mods-file-mode 為何都用本地 PoE2 詞綴表（線上來源尚未提供）。
+    const poe2_stats_data = is_poe2 ? await local_loader.get_data("local_poe2_stats_data") : null;
+
+    console.log(`[R2T][BG] injection start (game=${game}, poe2_stats=${is_poe2 ? "loaded" : "n/a"}), tabId=${details.tabId}`);
+
     if (await get_status("mods-file-mode") === "online") {
         try {
             chrome.scripting.executeScript({
                 target: { tabId: details.tabId },
                 function: inject_script,
                 args: [
-                    await online_loader.get_data("online_stats_data"),
+                    is_poe2 ? poe2_stats_data : await online_loader.get_data("online_stats_data"),
                     await online_loader.get_data("online_gems_data"),
                     await online_loader.get_data("online_tw_gems_data"),
                     query_data,
                     gems_query_data,
-                    equipment_data
+                    equipment_data,
+                    game
                 ],
             });
         } catch (e) {
@@ -97,12 +116,13 @@ async function fetch_character_data(details) {
                 target: { tabId: details.tabId },
                 function: inject_script,
                 args: [
-                    await local_loader.get_data("local_stats_data"),
+                    is_poe2 ? poe2_stats_data : await local_loader.get_data("local_stats_data"),
                     await local_loader.get_data("local_gems_data"),
                     await local_loader.get_data("local_tw_gems_data"),
                     query_data,
                     gems_query_data,
-                    equipment_data
+                    equipment_data,
+                    game
                 ],
             });
         }
@@ -116,7 +136,8 @@ async function fetch_character_data(details) {
                 await local_loader.get_data("local_tw_gems_data"),
                 query_data,
                 gems_query_data,
-                equipment_data
+                equipment_data,
+                game
             ],
         });
     }
@@ -132,9 +153,13 @@ async function fetch_character_data(details) {
  * @param {Object} equipment_data 抓取到的角色裝備資料，內容來源為 poe.ninja，但格式是 POE 官方定義的
  * @return {None}
  */
-async function inject_script(stats_data, gems_data, tw_gems_data, query_data, gems_query_data, equipment_data) {
+async function inject_script(stats_data, gems_data, tw_gems_data, query_data, gems_query_data, equipment_data, game) {
     function dbg_log(msg) { if (is_debugging) console.log(msg); }
     function dbg_warn(msg) { if (is_debugging) console.warn(msg); }
+
+    // game 由 background 傳入，"poe1" 或 "poe2"；舊版呼叫未帶此參數時預設 poe1
+    const is_poe2 = game === "poe2";
+    console.log(`[R2T][PAGE] inject_script start (game=${game || "poe1"})`);
 
     const is_debugging = (await chrome.storage.local.get(["debug"]))["debug"] === "on";
     const redirect_to = (await chrome.storage.local.get(["redirect-to"]))["redirect-to"];
@@ -162,7 +187,10 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         await chrome.storage.local.remove("show_update_popup");
     }
 
-    const POE_TRADE_URL = `https://www.pathofexile.${redirect_to}/trade/search`;
+    // PoE1: /trade/search ；PoE2: /trade2/search/poe2（poe2 為 realm 區段，省略 league 時導向預設聯盟）
+    const POE_TRADE_URL = is_poe2
+        ? `https://www.pathofexile.${redirect_to}/trade2/search/poe2`
+        : `https://www.pathofexile.${redirect_to}/trade/search`;
     const BALANCE_ICON = `<path xmlns="http://www.w3.org/2000/svg" d="M14.6302 7L13.0002 3H14.0002V2H9.00024V1H8.00024V2H3.00024V3H4.00024L2.38024 7H2.00024V8H2.15024C2.30663 8.49791 2.623 8.93028 3.05024 9.23C3.47189 9.53576 3.9794 9.7004 4.50024 9.7004C5.02108 9.7004 5.5286 9.53576 5.95024 9.23C6.3776 8.92817 6.69663 8.49696 6.86024 8H7.00024V7H6.55024L4.88024 3H8.00024V11H6.00024L5.61024 11.18L3.61024 13.69L4.00024 14.5H13.0002L13.3902 13.69L11.3902 11.18L11.0002 11H9.00024V3H12.1302L10.4602 7H10.0002V8H10.1502C10.3138 8.49544 10.6294 8.92668 11.0522 9.23236C11.4751 9.53804 11.9835 9.70258 12.5052 9.70258C13.027 9.70258 13.5354 9.53804 13.9582 9.23236C14.3811 8.92668 14.6967 8.49544 14.8602 8H15.0002V7H14.6302ZM5.22024 8.51C4.99971 8.63205 4.75229 8.69734 4.50024 8.7C4.25119 8.69869 4.00667 8.63326 3.79024 8.51C3.56955 8.38903 3.38362 8.21342 3.25024 8H5.75024C5.61799 8.21083 5.436 8.38595 5.22024 8.51ZM5.47024 7H3.47024L4.47024 4.6L5.47024 7ZM10.7602 12L12.0002 13.5H5.00024L6.24024 12H10.7602ZM12.5402 4.62L13.5402 7.02H11.5402L12.5402 4.62ZM13.2202 8.53C13.0016 8.65671 12.7529 8.72233 12.5002 8.72V8.72C12.2506 8.72355 12.0048 8.65778 11.7902 8.53C11.5692 8.40065 11.3837 8.21856 11.2502 8H13.7502C13.6263 8.2225 13.4427 8.40604 13.2202 8.53V8.53Z" fill="#424242"/>`;
     const CHECK_ICON = `<path fill-rule="evenodd" clip-rule="evenodd" d="M14.4315 3.3232L5.96151 13.3232L5.1708 13.2874L1.8208 8.5174L2.63915 7.94268L5.61697 12.1827L13.6684 2.67688L14.4315 3.3232Z" fill="#388A34"/>`;
     const CROSS_ICON = `<path fill-rule="evenodd" clip-rule="evenodd" d="M8.00028 8.70711L11.6467 12.3536L12.3538 11.6465L8.70739 8.00001L12.3538 4.35356L11.6467 3.64645L8.00028 7.2929L4.35384 3.64645L3.64673 4.35356L7.29317 8.00001L3.64673 11.6465L4.35384 12.3536L8.00028 8.70711Z" fill="#E51400"/>`;
@@ -247,7 +275,11 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
 
     dbg_log(lang_matching);
 
-    const mod_types = ["enchant", "implicit", "fractured", "explicit", "crafted", "mutated"];
+    // PoE1 與 PoE2 的詞綴類型不同：PoE2 新增 rune/desecrated/sanctum/skill，且沒有 mutated。
+    // 這些字串對應 item_data["${type}Mods"] 與 poe2_stats res 的 "${type}Mods" 欄位。
+    const mod_types = is_poe2
+        ? ["enchant", "implicit", "fractured", "explicit", "crafted", "rune", "desecrated", "sanctum", "skill"]
+        : ["enchant", "implicit", "fractured", "explicit", "crafted", "mutated"];
 
     function clean_empty_entries(obj) {
         for (const key in obj) {
@@ -398,7 +430,12 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         new_node.addEventListener("click", () => {
             update_mask_list(node, mask_list);
             let url = "";
-            if (is_gem) {
+            if (is_poe2) {
+                // PoE2：物品以「底材/名稱 + 可對應到的 mod stats」搜尋；
+                // 寶石仍只用名稱（PoE2 寶石不在 gems_data 內）。
+                if (is_gem) url = `${POE_TRADE_URL}?q=${gen_poe2_name_query(item_data)}`;
+                else url = `${POE_TRADE_URL}?q=${gen_query(mask_list, item_data, is_gem, true)}`;
+            } else if (is_gem) {
                 let gem_name = "";
                 if (item_data.name) gem_name += item_data.name + " ";
                 if (item_data.typeLine) gem_name += item_data.typeLine;
@@ -422,6 +459,13 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
     function gen_stats_by_item_data(mask_list, item_data, is_gem) {
         function is_check(key) {
             return (mask_list.get(String(key)) === "check");
+        }
+
+        // PoE2：從詞綴字串取出實際 roll 值，作為 trade 的 value.min。
+        // 僅在恰有單一數值時採用；多值（如「Adds X to Y Damage」）意義不明確，維持只比對詞綴存在。
+        function extract_roll_value(mod_string) {
+            const nums = (mod_string.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+            return nums.length === 1 ? nums[0] : undefined;
         }
 
         if (is_gem) return undefined;
@@ -457,6 +501,8 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
                 const target_index = mod_type === "mutated" ? "explicitMods" : mod_type_index;
                 const mod_ids = res[target_index];
                 const value = res["value"];
+                // PoE2 才額外帶上實際 roll 值（min）；PoE1 維持原本只比對詞綴存在的行為
+                const roll = is_poe2 ? extract_roll_value(mod) : undefined;
 
                 if (!mod_ids) {
                     dbg_warn(item_inventoryId);
@@ -469,8 +515,9 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
                 if (mod_ids.length > 1) {
                     const filters = [];
                     for (const mod_id of mod_ids) {
-                        if (!value) filters.push({ id: mod_id, disabled: disabled });
-                        else filters.push({ id: mod_id, value: { min: value }, disabled: disabled });
+                        if (value) filters.push({ id: mod_id, value: { min: value }, disabled: disabled });
+                        else if (roll !== undefined) filters.push({ id: mod_id, value: { min: roll }, disabled: disabled });
+                        else filters.push({ id: mod_id, disabled: disabled });
                     }
 
                     item_stats.push({
@@ -481,6 +528,7 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
                 } else {
                     if (value && value === 100) item_stats[0].filters.push({ id: mod_ids[0], value: { min: value }, disabled: disabled });
                     else if (value) item_stats[0].filters.push({ id: mod_ids[0], option: value, disabled: disabled });
+                    else if (roll !== undefined) item_stats[0].filters.push({ id: mod_ids[0], value: { min: roll }, disabled: disabled });
                     else item_stats[0].filters.push({ id: mod_ids[0], disabled: disabled });
                 }
                 dbg_log("[SUCCESS] id=" + mod_ids[0] + ", value=" + value + ", mod_string='" + mod + "'");
@@ -618,7 +666,24 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         return { option: trade_type };
     }
 
-    function gen_query(mask_list, item_data, is_gem) {
+    // PoE2 里程碑 1：只用名稱/底材搜尋，不帶任何 mod/filter。
+    // item_data.name 為唯一物品名稱（一般物品為空），typeLine 為底材名稱。
+    function gen_poe2_name_query(item_data) {
+        let res = {
+            query: {
+                status: gen_status(),
+            },
+            sort: { price: "asc" }
+        };
+
+        if (item_data && item_data["name"]) res.query.name = item_data["name"];
+        if (item_data && item_data["typeLine"]) res.query.type = item_data["typeLine"];
+
+        res = clean_empty_entries(res);
+        return JSON.stringify(res);
+    }
+
+    function gen_query(mask_list, item_data, is_gem, include_base) {
         let res = {
             query: {
                 filters: gen_filters_by_item_data(mask_list, item_data, is_gem),
@@ -629,6 +694,12 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
                 price: "asc"
             }
         };
+
+        // PoE2 會帶上底材/名稱，讓即使沒有任何 mod 對應到時，仍退化為底材搜尋。
+        if (include_base && item_data) {
+            if (item_data["name"]) res.query.name = item_data["name"];
+            if (item_data["typeLine"]) res.query.type = item_data["typeLine"];
+        }
 
         res = clean_empty_entries(res);
         return JSON.stringify(res);
@@ -745,7 +816,7 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
 
             if (is_gem) {
                 if (item_data["properties"]) {
-                    for (var ele of item_data["properties"]) {
+                    for (var ele of item_data["properties"] || []) {
                         switch (ele["type"]) {
                             case 5:
                             case 6:
@@ -765,7 +836,7 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
                 return res;
             }
 
-            for (var ele of item_data["properties"]) {
+            for (var ele of item_data["properties"] || []) {
                 switch (ele["type"]) {
                     case 6:
                     case 9:
@@ -907,14 +978,19 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         const quality = get_item_quality(tippy_node);
 
         const item_info = get_item_data_by_node(tippy_node, item_name, level);
-        if (item_info === undefined) return;
+        if (item_info === undefined && !is_poe2) return;
 
-        const item_data = item_info.data;
-        const is_gem = item_info.is_gem;
+        // PoE2 里程碑 1：即使在 equipment_data 找不到對應物品（資料結構可能不同），
+        // 仍以 tippy 標題的物品名稱做為底材，確保按鈕注入端到端可運作。
+        const item_data = item_info ? item_info.data : { typeLine: item_name };
+        const is_gem = item_info ? item_info.is_gem : false;
 
         // 使用官方資料庫的唯一 id，若無則降級為組合屬性
         const cache_key = item_data.id ? item_data.id : (item_name + "_" + (item_data.ilvl || "") + "_" + JSON.stringify(item_data.explicitMods || []));
 
+        // PoE1 與 PoE2 共用同一條路徑：產生 mask_list（gen_mask_list 已對缺少 properties
+        // 的情況做防護），Trade 按鈕據此決定哪些 mod 預設啟用。PoE2 找不到對應 mod 時，
+        // 會在 gen_query 退化為底材搜尋，因此不會壞掉。
         let mask_list;
         if (global_mask_cache.has(cache_key)) {
             mask_list = global_mask_cache.get(cache_key);
@@ -924,7 +1000,12 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         }
 
         const article_div = tippy_node.querySelector("article > div");
-        if (!article_div) return;
+        if (!article_div) {
+            console.log(`[R2T][PAGE] selector NOT found ("article > div") for "${item_name}" — skipping injection`);
+            return;
+        }
+        console.log(`[R2T][PAGE] selector found ("article > div") for "${item_name}" (game=${game || "poe1"})`);
+
         const mask_target = get_all_deepest_div(article_div);
 
         const button_keys = Array.from(mask_list.keys());
@@ -942,10 +1023,28 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         if (last_div) last_div.prepend(trade_button);
     }
 
+    // poe.ninja（PoE1 與 PoE2 共用同一套 floating-ui/tippy 框架）會把彈出視窗
+    // 掛在 div[data-floating-ui-portal] 之下。SPA 可能在注入時尚未產生此容器。
+    const PORTAL_SELECTOR = "div[data-floating-ui-portal]";
+
+    // 將 tippy_observer 掛到指定 portal，並處理其中已存在的彈出視窗
+    function observe_portal(portal) {
+        console.log(`[R2T][PAGE] portal container found ("${PORTAL_SELECTOR}") — observing`);
+        tippy_observer.observe(portal, { childList: true });
+        for (const child of portal.children) {
+            process_tippy(child);
+        }
+    }
+
     const tippy_observer = new MutationObserver(mutationRecords => {
         for (const mutationRecord of mutationRecords) {
             for (const addedNode of mutationRecord["addedNodes"]) {
                 process_tippy(addedNode);
+
+                // 若 portal 容器是後來才被建立的，動態補掛 observer（SPA 延遲渲染的重試機制）
+                if (addedNode.nodeType === 1 && addedNode.matches && addedNode.matches(PORTAL_SELECTOR)) {
+                    observe_portal(addedNode);
+                }
             }
         }
     });
@@ -954,18 +1053,318 @@ async function inject_script(stats_data, gems_data, tw_gems_data, query_data, ge
         childList: true
     });
 
-    const portal = document.querySelector("div[data-floating-ui-portal]");
-    if (portal) {
-        tippy_observer.observe(portal, {
-            childList: true
-        });
-    }
-
-    const existing_tippies = document.querySelectorAll("div[data-floating-ui-portal]");
-    for (const tippy of existing_tippies) {
-        process_tippy(tippy);
+    const existing_portals = document.querySelectorAll(PORTAL_SELECTOR);
+    if (existing_portals.length > 0) {
+        for (const portal of existing_portals) {
+            observe_portal(portal);
+            process_tippy(portal);
+        }
+    } else {
+        console.log(`[R2T][PAGE] portal container NOT found yet ("${PORTAL_SELECTOR}") — MutationObserver will retry on render`);
     }
 };
+
+/**
+ * 注入進 PoE2 PoB 分享頁的腳本（由 tabs.onUpdated 觸發，在頁面情境執行）：
+ * 自行抓取並解碼 /poe2/pob/raw/<id>，解析現用裝備組，為每件裝備建立一顆 Trade 按鈕，
+ * 集中放在頁面右上角的自帶面板。連結會帶上「名稱/底材 + 可對應到的 explicit mod stats」。
+ * 不經 webRequest（該請求在頁面載入早期觸發，MV3 service worker 常來不及攔截）。
+ * @param {Object} poe2_stats Exiled Exchange 2 的 PoE2 詞綴表（last-two-words -> matchers）
+ * @param {string[]} poe2_bases PoE2 底材名稱清單，用於還原魔法物品的底材
+ * @param {string[]} poe2_gems PoE2 可交易寶石名稱清單，用於過濾技能組裡的寶石
+ * @return {None}
+ */
+async function inject_pob_panel(poe2_stats, poe2_bases, poe2_gems) {
+    const PANEL_ID = "r2t-pob-panel";
+    console.log("[R2T][PAGE] inject_pob_panel start");
+
+    const bases_set = new Set(poe2_bases || []);
+    const gems_set = new Set(poe2_gems || []);
+    // 魔法物品名稱為「字首 + 底材 + of 字尾」，PoB 不另存底材。先去掉 " of 字尾"，
+    // 再用 bases_set 取最長的「字尾相符底材」（從整串往後縮，第一個命中的即最長底材）。
+    function extract_magic_base(name) {
+        const candidate = name.split(/ of /i)[0].trim();
+        const words = candidate.split(/\s+/);
+        for (let i = 0; i < words.length; i++) {
+            const sub = words.slice(i).join(" ");
+            if (bases_set.has(sub)) return sub;
+        }
+        return null;
+    }
+
+    const redirect_to = (await chrome.storage.local.get(["redirect-to"]))["redirect-to"] || "com";
+    const trade_type = (await chrome.storage.local.get(["trade-type"]))["trade-type"];
+    const POE2_TRADE_URL = `https://www.pathofexile.${redirect_to}/trade2/search/poe2`;
+
+    // 1) 自行抓取並解碼 PoB 匯出碼（base64 + zlib），與頁面相同情境（已驗證可行）
+    let xml;
+    try {
+        const code_id = location.pathname.split("/").filter(Boolean).pop();
+        const b64 = await (await fetch(`/poe2/pob/raw/${code_id}`)).text();
+        const bytes = Uint8Array.from(atob(b64.trim().replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+        const stream = new Response(bytes).body.pipeThrough(new DecompressionStream("deflate"));
+        xml = await new Response(stream).text();
+        console.log(`[R2T][PAGE] pob fetched+decoded, xml length=${xml.length}`);
+    } catch (e) {
+        console.error("[R2T][PAGE] pob fetch/decode failed:", e);
+        return;
+    }
+
+    let doc;
+    try {
+        doc = new DOMParser().parseFromString(xml, "text/xml");
+    } catch (e) {
+        console.error("[R2T][PAGE] PoB XML parse failed:", e);
+        return;
+    }
+
+    // ---- mod 解析：把 PoB 物品文字中的 explicit mod 對應到 PoE2 trade stat id ----
+    // 與 background.js find_mod_id 同樣的 last-two-words 取鍵 + 正則比對邏輯（英文版）
+    function strip_num(s) { return s.replace(/(([\+-]?[\d\.]+%?)|(#%)|(#))/, ""); }
+    const MOD_ID_ORDER = ["explicitMods", "runeMods", "implicitMods", "fracturedMods", "craftedMods", "desecratedMods", "sanctumMods", "skillMods", "enchantMods"];
+    function resolve_mod_id(mod_string) {
+        const parts = mod_string.trim().split(" ");
+        let key = parts.length >= 2
+            ? strip_num(parts[parts.length - 2]) + strip_num(parts[parts.length - 1])
+            : strip_num(parts[parts.length - 1]);
+        const matchers = poe2_stats[key.toLowerCase()];
+        if (!matchers) return null;
+        for (const m of matchers) {
+            const match = new RegExp(m.matcher).exec(mod_string);
+            if (!match) continue;
+
+            let id = null;
+            for (const t of MOD_ID_ORDER) if (m.res[t]) { id = m.res[t][0]; break; }
+            if (!id) continue;
+
+            // 從具名捕獲群組(num0/percent0...)取出實際 roll 值；只有單一數值時才當作 min，
+            // 多值（如「Adds X to Y Damage」）數值意義不明確故維持只比對詞綴存在。
+            const nums = [];
+            const groups = match.groups || {};
+            for (const gk in groups) {
+                if (groups[gk] == null) continue;
+                const v = parseFloat(String(groups[gk]).replace("%", ""));
+                if (!isNaN(v)) nums.push(v);
+            }
+            return { id, value: nums.length === 1 ? nums[0] : undefined };
+        }
+        return null;
+    }
+
+    // 從 PoB 物品文字取出「實際 explicit mod」：在 "Implicits: N" 之後、跳過 N 行 implicit，其餘為 explicit
+    function parse_item_node(node) {
+        const lines = node.textContent.split("\n").map(s => s.trim()).filter(Boolean);
+        if (!lines.length) return null;
+
+        let i = 0, rarity = null;
+        if (lines[0].startsWith("Rarity:")) { rarity = lines[0].slice(7).trim().toUpperCase(); i = 1; }
+        const name = lines[i] || "";
+        const maybe_base = lines[i + 1] || "";
+        // 魔法物品名稱含字首/字尾、且 PoB 不另存底材行，需從名稱還原底材
+        let base = (rarity === "MAGIC") ? (extract_magic_base(name) || name)
+            : ((maybe_base && !maybe_base.includes(":")) ? maybe_base : name); // 屬性行含冒號
+
+        let mods = [];
+        const imp_idx = lines.findIndex(l => /^Implicits:\s*\d+/.test(l));
+        if (imp_idx !== -1) {
+            const n_imp = parseInt(lines[imp_idx].match(/^Implicits:\s*(\d+)/)[1], 10) || 0;
+            mods = lines.slice(imp_idx + 1 + n_imp)              // 跳過 implicit，取 explicit
+                .map(l => l.replace(/^(\{[^}]*\})+/, "").trim()) // 去除 PoB 的 {variant}{range}{tags} 註記
+                .filter(Boolean)
+                // 略過物品旗標行（非詞綴，trade 用獨立 filter 表示）
+                .filter(l => !/^(Corrupted|Mirrored|Split|Synthesised|Fractured Item)$/i.test(l));
+        }
+        return { rarity, name, base, mods };
+    }
+
+    const item_by_id = {};
+    for (const node of doc.querySelectorAll("Items > Item")) {
+        const id = node.getAttribute("id");
+        const parsed = parse_item_node(node);
+        if (id && parsed) item_by_id[id] = parsed;
+    }
+
+    // 找出現用裝備組（activeItemSet），取其各 Slot 對應的裝備
+    const items_root = doc.querySelector("Items");
+    const active_id = items_root ? items_root.getAttribute("activeItemSet") : null;
+    let active_set = active_id ? doc.querySelector(`ItemSet[id="${active_id}"]`) : null;
+    if (!active_set) active_set = doc.querySelector("ItemSet"); // 退而求其次取第一組
+
+    const equipped = [];
+    const seen_item_ids = new Set();
+    if (active_set) {
+        for (const slot of active_set.querySelectorAll("Slot")) {
+            const item_id = slot.getAttribute("itemId");
+            const slot_name = slot.getAttribute("name") || "";
+            if (!item_id || item_id === "0") continue;        // 空欄位
+            if (/Swap/i.test(slot_name)) continue;            // 略過備用武器槽，減少雜訊
+            if (seen_item_ids.has(item_id)) continue;
+            seen_item_ids.add(item_id);
+            const it = item_by_id[item_id];
+            if (it) equipped.push({ slot: slot_name, ...it });
+        }
+    }
+
+    // 解析現用技能組（activeSkillSet）裡的寶石：過濾成真正可交易的寶石並去重
+    const skills_root = doc.querySelector("Skills");
+    const active_skill_id = skills_root ? skills_root.getAttribute("activeSkillSet") : null;
+    let active_skill_set = active_skill_id ? doc.querySelector(`SkillSet[id="${active_skill_id}"]`) : null;
+    if (!active_skill_set) active_skill_set = doc.querySelector("SkillSet");
+
+    const gems = [];
+    const seen_gem_names = new Set();
+    if (active_skill_set) {
+        for (const gem of active_skill_set.querySelectorAll("Gem")) {
+            const name = gem.getAttribute("nameSpec");
+            if (!name || gem.getAttribute("enabled") === "false") continue;
+            // 只收清單中真正可交易的寶石（排除武器內建技能等），並去重
+            if (!gems_set.has(name) || seen_gem_names.has(name)) continue;
+            seen_gem_names.add(name);
+            gems.push({
+                name,
+                level: parseInt(gem.getAttribute("level") || "0", 10),
+                quality: parseInt(gem.getAttribute("quality") || "0", 10),
+            });
+        }
+    }
+
+    console.log(`[R2T][PAGE] pob parsed: ${equipped.length} equipped items (activeItemSet=${active_id}), ${gems.length} gems (activeSkillSet=${active_skill_id})`);
+    if (equipped.length === 0 && gems.length === 0) {
+        console.log("[R2T][PAGE] no equipped items or gems parsed — aborting panel");
+        return;
+    }
+
+    // 依「名稱/底材 + 對應到的 explicit mod stat id」組出 trade2 搜尋連結
+    function build_trade_url(item) {
+        const query = { query: {}, sort: { price: "asc" } };
+        if (trade_type) query.query.status = { option: trade_type };
+        if (item.rarity === "UNIQUE" && item.name) query.query.name = item.name;
+        if (item.base) query.query.type = item.base;
+
+        const filters = [];
+        const seen_ids = new Set();
+        for (const mod of item.mods || []) {
+            const r = resolve_mod_id(mod);
+            if (r && !seen_ids.has(r.id)) {
+                seen_ids.add(r.id);
+                const f = { id: r.id, disabled: false };
+                if (r.value !== undefined) f.value = { min: r.value };
+                filters.push(f);
+            }
+        }
+        if (filters.length) query.query.stats = [{ type: "and", filters }];
+
+        return { url: `${POE2_TRADE_URL}?q=${JSON.stringify(query)}`, matched: filters.length, total: (item.mods || []).length };
+    }
+
+    // 寶石以名稱(type)搜尋，並帶上等級/品質作為 min。
+    // 注意 trade2 結構：gem_level 在 misc_filters，quality 在 type_filters（與 PoE1 不同）。
+    function build_gem_url(gem) {
+        const query = { query: { type: gem.name }, sort: { price: "asc" } };
+        if (trade_type) query.query.status = { option: trade_type };
+        const filters = {};
+        if (gem.level > 1) filters.misc_filters = { filters: { gem_level: { min: gem.level } } };
+        if (gem.quality > 0) filters.type_filters = { filters: { quality: { min: gem.quality } } };
+        if (Object.keys(filters).length) query.query.filters = filters;
+        return `${POE2_TRADE_URL}?q=${JSON.stringify(query)}`;
+    }
+
+    // 移除舊面板（重複注入時）
+    const old = document.getElementById(PANEL_ID);
+    if (old) old.remove();
+
+    const panel = document.createElement("div");
+    panel.id = PANEL_ID;
+    panel.setAttribute("style", [
+        "position:fixed", "top:64px", "right:12px", "z-index:99999",
+        "width:340px", "max-height:70vh", "overflow:auto",
+        "background:#1a1a1a", "color:#eee", "border:1px solid #444",
+        "border-radius:8px", "box-shadow:0 4px 16px rgba(0,0,0,.5)",
+        "font:12px/1.4 system-ui,sans-serif", "padding:8px"
+    ].join(";"));
+
+    const header = document.createElement("div");
+    header.setAttribute("style", "display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-weight:600;");
+    const title = document.createElement("span");
+    title.textContent = `Trade (PoB) — ${equipped.length} items, ${gems.length} gems`;
+    const close = document.createElement("span");
+    close.textContent = "✕";
+    close.setAttribute("style", "cursor:pointer;padding:0 4px;color:#aaa;");
+    close.addEventListener("click", () => panel.remove());
+    header.appendChild(title);
+    header.appendChild(close);
+    panel.appendChild(header);
+
+    let total_matched = 0;
+    for (const item of equipped) {
+        const { url, matched, total } = build_trade_url(item);
+        total_matched += matched;
+
+        const row = document.createElement("div");
+        row.setAttribute("style", "display:flex;justify-content:space-between;align-items:center;gap:6px;padding:4px 0;border-top:1px solid #333;");
+
+        const label = document.createElement("div");
+        label.setAttribute("style", "min-width:0;overflow:hidden;");
+        const top = document.createElement("div");
+        top.setAttribute("style", "color:#9cf;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;");
+        top.textContent = item.rarity === "UNIQUE" ? item.name : item.base;
+        const sub = document.createElement("div");
+        sub.setAttribute("style", "color:#888;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;");
+        const mod_note = total > 0 ? ` · ${matched}/${total} mods` : "";
+        sub.textContent = `${item.slot}${item.rarity === "UNIQUE" ? " — " + item.base : ""}${mod_note}`;
+        label.appendChild(top);
+        label.appendChild(sub);
+
+        const btn = document.createElement("a");
+        btn.textContent = "Trade";
+        btn.href = url;
+        btn.target = "_blank";
+        btn.rel = "noopener";
+        btn.setAttribute("style", "flex:none;background:#2a6;color:#fff;text-decoration:none;padding:3px 8px;border-radius:4px;cursor:pointer;");
+
+        row.appendChild(label);
+        row.appendChild(btn);
+        panel.appendChild(row);
+    }
+
+    // 寶石區段
+    if (gems.length) {
+        const divider = document.createElement("div");
+        divider.setAttribute("style", "margin-top:8px;padding-top:6px;border-top:2px solid #555;font-weight:600;color:#cba6f7;");
+        divider.textContent = `Gems — ${gems.length}`;
+        panel.appendChild(divider);
+
+        for (const gem of gems) {
+            const row = document.createElement("div");
+            row.setAttribute("style", "display:flex;justify-content:space-between;align-items:center;gap:6px;padding:4px 0;border-top:1px solid #333;");
+
+            const label = document.createElement("div");
+            label.setAttribute("style", "min-width:0;overflow:hidden;");
+            const top = document.createElement("div");
+            top.setAttribute("style", "color:#cba6f7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;");
+            top.textContent = gem.name;
+            const sub = document.createElement("div");
+            sub.setAttribute("style", "color:#888;font-size:11px;");
+            sub.textContent = `Lv ${gem.level}${gem.quality > 0 ? " · Q" + gem.quality : ""}`;
+            label.appendChild(top);
+            label.appendChild(sub);
+
+            const btn = document.createElement("a");
+            btn.textContent = "Trade";
+            btn.href = build_gem_url(gem);
+            btn.target = "_blank";
+            btn.rel = "noopener";
+            btn.setAttribute("style", "flex:none;background:#2a6;color:#fff;text-decoration:none;padding:3px 8px;border-radius:4px;cursor:pointer;");
+
+            row.appendChild(label);
+            row.appendChild(btn);
+            panel.appendChild(row);
+        }
+    }
+
+    document.body.appendChild(panel);
+    console.log(`[R2T][PAGE] pob panel injected: ${equipped.length} items (${total_matched} mod-stats), ${gems.length} gems`);
+}
 
 // 初始化所需設定
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -984,5 +1383,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
-// 當頁面建立或重新整理時，擷取送出的封包以取得能拿到角色資料的 api 網址
-chrome.tabs.onUpdated.addListener(chrome.webRequest.onBeforeRequest.addListener(fetch_character_data, API_URLS_FILTER));
+// PoE1 / PoE2 角色頁：攔截送出的封包以取得角色裝備資料 API 網址
+chrome.webRequest.onBeforeRequest.addListener(fetch_character_data, API_URLS_FILTER);
+
+// PoE2 PoB 分享頁（/poe2/pob/<id>）：改用 tabs.onUpdated 觸發，注入腳本自行抓取並解碼。
+// /poe2/pob/raw 在頁面載入早期觸發，MV3 service worker 常來不及用 webRequest 攔截。
+const POB_PAGE_RE = /^https:\/\/poe\.ninja\/poe2\/pob\/[^/?#]+/;
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+    if (changeInfo.status !== "complete") return;
+    if (!tab.url || !POB_PAGE_RE.test(tab.url)) return;
+
+    try {
+        const local_loader = new LocalDataLoader();
+        await local_loader.update_data();
+        const poe2_stats = await local_loader.get_data("local_poe2_stats_data");
+        const poe2_bases = await local_loader.get_data("local_poe2_bases_data");
+        const poe2_gems = await local_loader.get_data("local_poe2_gems_data");
+
+        console.log(`[R2T][BG] pob page detected, injecting: ${tab.url}`);
+        chrome.scripting.executeScript({
+            target: { tabId },
+            function: inject_pob_panel,
+            args: [poe2_stats, poe2_bases, poe2_gems],
+        });
+    } catch (e) {
+        console.error("[R2T][BG] pob inject failed:", e);
+    }
+});
