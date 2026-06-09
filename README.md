@@ -20,6 +20,10 @@ A Chrome extension that adds one-click **Trade** search to [poe.ninja](https://p
 
 Open the extension's icon to change the modifier language and other settings.
 
+## Documentation
+
+See [docs/HOW_IT_WORKS.md](./docs/HOW_IT_WORKS.md) for the architecture and data flow (how the extension reads builds and produces trade searches for both PoE 1 and PoE 2).
+
 ## Acknowledgements
 
 - Based on the original [poe_ninja_redirect_to_trade](https://github.com/iwtba4188/poe_ninja_redirect_to_trade) by [@iwtba4188](https://github.com/iwtba4188).
